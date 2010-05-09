@@ -1,0 +1,28 @@
+
+XRefresh server linux python implementation.
+
+Use mode: xrefresh-server [options] dirname [dirname ...]
+    Options:
+        -e [regexp] - Exclude paths matching regexp. Defaults to '"""+exclude_str+"""'
+        -i [regexp] - Include only paths matching regexp
+        -p [port]   - Port to listen (default 41258)
+        -h          - Show this help message
+
+    Ej:
+        Watch changes in files in /var/www ending in .css whose full path don't contain "cache"
+        $xrefresh-server -e 'cache' -i '\.css$' /var/www
+    
+    Notes:
+        Be careful with infinite loops. When refreshing webbrowser, a lot of
+        files can be modified in the server: log files, cache, sqlite databases, etc...
+        This changes can generate a infinite loop, use the -e option to exclude these files,
+        or use the -i option to include only some files (ej: css$)
+        
+
+You may also be interested in:
+XRefresh homepage: http://xrefresh.binaryage.com/
+XRefresh firefox add-on: https://addons.mozilla.org/es-ES/firefox/addon/7711/
+XRefresh server for windows: http://xrefresh.binaryage.com/#windows
+                on git-hub: http://github.com/darwin/xrefresh/tree/master/src/winmonitor/
+XRefresh server for osx: http://xrefresh.binaryage.com/#osx
+                on git-hub: http://github.com/MarcWeber/xrefresh-server
