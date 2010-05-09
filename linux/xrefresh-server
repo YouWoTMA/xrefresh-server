@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+# XRefresh linux server
+# Copyright (C) 2010 David Bengoa
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import socket
+import json
+import asyncore
+import pyinotify
+import time
+import os
+import sys
+from thread import start_new_thread
+from threading import Timer
+import re
+
+exclude_str = r"""^(\.svn|\.hg|.*~|.*\.(zip|rar|jar|gz|gz2|bak|tmp|pyc|pyo|log))$"""
+exclude = re.compile(exclude_str)
+include = None # (all)
+port = 41258
+
+def bad_args():
+    print """Use mode: xrefresh-server [options] dirname [dirname ...]
+    Options:
+        -e [regexp] - Exclude paths matching regexp. Defaults to '"""+exclude_str+"""'
+        -i [regexp] - Include only paths matching regexp
+        -p [port]   - Port to listen (default 41258)
+        -h          - Show this help message
+
+    Ej:
+        Watch changes in files in /var/www ending in .css whose full path don't contain "cache"
+        $xrefresh-server -e 'cache' -i '\.css$' /var/www
+    
+    Notes:
+        Be careful with infinite loops. When refreshing webbrowser, a lot of
+        files can be modified in the server: log files, cache, sqlite databases, etc...
+        This changes can generate a infinite loop, use the -e option to exclude these files,
+        or use the -i option to include only some files (ej: css$)
+    """
+    exit(0)
+
+
+class FileWhatcher(pyinotify.ProcessEvent):
+    def __init__(self,server,paths,include,exclude):
+        self.include = include
+        self.exclude = exclude
+        self.server = server
+        self.timer = None
+        self.files = []
+        
+        wm = pyinotify.WatchManager()
+        notifier = pyinotify.AsyncNotifier(wm,self)
+        for path in paths:
+            wm.add_watch(path, pyinotify.IN_MODIFY, rec=True)
+            
+        start_new_thread(asyncore.loop,())
+        
+    def process_IN_MODIFY(self,event):
+        if event.pathname in self.files: #file already in chaged-list
+            return 
+        
+        include,exclude = self.include,self.exclude
+        if exclude is not None and exclude.search(event.pathname): #Path matches exclude pattern
+            print "File '{0}' Excluded (matched exclude pattern)".format(event.pathname)
+            return
+        
+        if include is None or include.search(event.pathname): #Path matches include pattern
+            self.files.append(event.pathname)
+            if self.timer:
+                self.timer.cancel()
+            self.timer = Timer(0.2,self.send_do_refresh)
+            self.timer.start()
+        else:
+            print "File '{0}' Excluded (didn't matched include pattern)".format(event.pathname)
+            
+    def send_do_refresh(self):
+        self.timer = None
+        ofiles = [{
+            'path1':f,
+            'path2': None,
+            'action' : "changed",
+        } for f in self.files]
+        self.files = []
+        
+        print "Sending DoRefresh Command with files:"
+        
+        contents = {}
+        for file in ofiles:
+            print "\t{0}".format(file['path1'])
+            if file['path1'][-4:] == ".css":
+                contents[file["path1"]] = open(file['path1'],"r").read()
+        
+        #find path
+        
+        
+        self.server.boardcast({
+            "command" : "DoRefresh", 
+            "root" : "/", 
+            "name" : "Various",
+            "date" : "date",   #?
+            "time" : "time",   #?
+            "type" : 'type',   #?
+            "files" : ofiles,
+            "contents" : contents
+        })
+
+class XRefreshClient():
+    SEPARATOR = '---XREFRESH-MESSAGE---'
+    USER_AGENT = 'XRefresh'
+    VERSION = "1.0"
+    def __init__(self,conn,server):
+        self.conn = conn
+        self.server = server
+        start_new_thread(self.loop,())
+        
+    def send_about(self):
+        self.send({
+            "command" : "AboutMe", 
+            "version" : self.VERSION, 
+            "agent" : self.USER_AGENT
+        })
+    def send(self,msg):
+        self.conn.send(json.dumps(msg)+self.SEPARATOR)
+    def loop(self):
+        conn = self.conn
+        global SEPARATOR
+        data = ""
+        while 1:
+            newdata = conn.recv(1024)
+            if not newdata:
+                break
+            data += newdata
+            pos = data.find(self.SEPARATOR)
+            if pos >= 0:
+                jso = json.loads(data[:pos])
+                if jso['command'] == 'Hello':
+                    self.send_about()
+                    print "Hello from client. About sent"
+                elif jso['command'] == 'SetPage':
+                    print "Client changed page to '{0}' <{1}>".format(jso["page"],jso["url"])
+                else:
+                    print "Recibido:",jso
+                data = data[pos+len(self.SEPARATOR):]
+        conn.close()
+        self.unregister()
+    def on_register(self,cid):
+        self.cid = cid
+    def unregister(self):
+        self.server.unregister(self.cid)
+    
+
+class XRefreshServer():
+    def register_client(self,client):
+        self.clients.append(client)
+        client.on_register(len(self.clients)-1)
+    def unregister_client(self,cid):
+        self.clients[cid] = None
+    def boardcast(self,msg):
+        for client in self.clients:
+            if client is not None:
+                client.send(msg)
+                
+    def __init__(self,port,paths,include,exclude):
+        host = '' #all interfaces
+        FileWhatcher(self,paths,include,exclude)
+        self.clients = []
+        print "Listening for client on port {0}...".format(port)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1) 
+        s.bind((host, port))
+        s.listen(3)
+        while 1:
+            conn, addr = s.accept()
+            print "New connection from {0}".format(addr)
+            self.register_client(XRefreshClient(conn,self))
+
+
+args = sys.argv[1:]
+if len(args) < 1:
+    bad_args()
+
+while len(args) > 0:
+    if args[0][0] == '-':
+        if len(args) == 1:
+            bad_args()
+        else:
+            if args[0] == '-e':
+                exclude = re.compile(args[1])
+            elif args[0] == '-i':
+                include = re.compile(args[1])
+            elif args[0] == '-p':
+                try:
+                    port = int(args[1])
+                except Exception:
+                    print "Invalid port"
+                    bad_args()
+            else:
+                bad_args()
+            args = args[2:]
+    else:
+        break
+
+if len(args) < 1:
+    bad_args()
+    
+print """This is free software; it may be used and copied under
+the GNU General Public License: http://www.gnu.org/licenses/gpl.html
+This program comes with ABSOLUTELY NO WARRANTY OF ANY KIND
+"""
+
+XRefreshServer(port,args,include,exclude)
