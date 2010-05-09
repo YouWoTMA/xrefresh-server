@@ -18,13 +18,18 @@
 import socket
 import json
 import asyncore
-import pyinotify
 import time
 import os
 import sys
 from thread import start_new_thread
 from threading import Timer
 import re
+try:
+    import pyinotify
+except ImportError:
+    print """To run this server you need pyinotify
+Try sudo apt-get install python-pyinotify
+"""
 
 exclude_str = r"""^(\.svn|\.hg|.*~|.*\.(zip|rar|jar|gz|gz2|bak|tmp|pyc|pyo|log))$"""
 exclude = re.compile(exclude_str)
